@@ -36,7 +36,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Install Playwright + Chromium browser ─────────────────────────────────────
-RUN playwright install chromium --with-deps
+# Use `python -m playwright` (reliable in Docker; bare `playwright` may not be on PATH)
+# --with-deps is omitted because system deps are already installed above
+RUN python -m playwright install chromium
 
 # ── Application code ──────────────────────────────────────────────────────────
 COPY . .
