@@ -1,6 +1,21 @@
 # Direct Link Grabber API
 
-A fast REST API that extracts **direct download links** from video URLs on YouTube, Twitter/X, Instagram, TikTok, Reddit, Facebook, Vimeo, and [1000+ other sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) — powered by **yt-dlp** and **FastAPI**.
+An IDM-style REST API that extracts **direct download links** from video URLs on **any website** — powered by **Playwright** (headless browser interception) + **yt-dlp** fallback.
+
+Works on YouTube, Twitter/X, Instagram, TikTok, Reddit, Facebook, Vimeo, Dailymotion, Twitch, and virtually **any site that streams video in a browser**.
+
+---
+
+## How It Works
+
+```
+URL → Headless Chromium loads the page (like a real browser)
+    → Intercepts all network requests (MP4, HLS .m3u8, DASH .mpd, WebM, audio...)
+    → Tries to auto-click play buttons to trigger lazy-loaded streams
+    → Reads <video>/<source> DOM elements
+    → yt-dlp enriches results for known platforms (YouTube, Twitter, etc.)
+    → Returns unified list of direct links + best pick
+```
 
 ---
 
@@ -8,45 +23,56 @@ A fast REST API that extracts **direct download links** from video URLs on YouTu
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET`  | `/`      | API info |
-| `GET`  | `/health`| Health check |
-| `GET`  | `/grab?url=<VIDEO_URL>` | Grab links (query param) |
-| `POST` | `/grab`  | Grab links (JSON body) |
-| `GET`  | `/docs`  | Interactive Swagger UI |
+| `GET`  | `/` | API info |
+| `GET`  | `/health` | Health check |
+| `GET`  | `/grab?url=<URL>` | Extract links (query param) |
+| `POST` | `/grab` | Extract links (JSON body) |
+| `GET`  | `/docs` | Swagger UI |
 
-### Example — GET request
+### GET Example
 ```
-GET /grab?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ
+GET /grab?url=https://example.com/video/123
+GET /grab?url=https://youtu.be/dQw4w9WgXcQ&use_browser=false
 ```
 
-### Example — POST request
+### POST Example
 ```json
 POST /grab
 {
-  "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  "quality": "best"
+  "url": "https://any-streaming-site.com/video/123",
+  "use_browser": true,
+  "timeout": 25
 }
 ```
 
-### Example Response
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `url` | required | Any video page URL |
+| `use_browser` | `true` | Use Playwright interception |
+| `timeout` | `25` | Timeout in seconds |
+
+### Response
 ```json
 {
-  "url": "https://www.youtube.com/watch?v=...",
+  "url": "https://...",
   "title": "Video Title",
-  "duration": 212.0,
   "thumbnail": "https://...",
-  "extractor": "youtube",
-  "best_video": "https://rr3---sn-....googlevideo.com/...",
-  "best_audio": "https://rr3---sn-....googlevideo.com/...",
-  "formats": [
+  "duration": 212.0,
+  "best_link": "https://direct-stream-url...",
+  "total": 5,
+  "links": [
     {
-      "format_id": "137",
-      "ext": "mp4",
       "url": "https://...",
-      "height": 1080,
+      "stream_type": "hls",
+      "source": "browser",
       "has_video": true,
-      "has_audio": false,
-      ...
+      "has_audio": true
+    },
+    {
+      "url": "https://...",
+      "stream_type": "mp4",
+      "height": 1080,
+      "source": "ytdlp"
     }
   ]
 }
@@ -54,9 +80,23 @@ POST /grab
 
 ---
 
+## Project Structure
+
+```
+.
+├── main.py              # FastAPI app
+├── extractor.py         # Orchestrator (browser → yt-dlp fallback)
+├── browser_extractor.py # Playwright interception engine
+├── requirements.txt
+├── Dockerfile
+└── docker-compose.yml   # Local testing
+```
+
+---
+
 ## Local Development
 
-### Using Docker Compose
+### Docker Compose
 ```bash
 docker compose up --build
 ```
@@ -65,6 +105,7 @@ API available at `http://localhost:8000`
 ### Without Docker
 ```bash
 pip install -r requirements.txt
+playwright install chromium
 uvicorn main:app --reload
 ```
 
@@ -83,29 +124,19 @@ git push -u origin main
 
 ### Step 2 — Create Koyeb Service
 
-1. Go to [app.koyeb.com](https://app.koyeb.com) → **Create Service**
-2. Select **GitHub** as the source and choose your repository
-3. Under **Builder**, select **Dockerfile** (Koyeb auto-detects it)
-4. Set the **Port** to `8000` (or leave it — Koyeb injects `PORT` env var automatically)
-5. Click **Deploy**
+1. [app.koyeb.com](https://app.koyeb.com) → **Create Service**
+2. Source: **GitHub** → select your repo
+3. Builder: **Dockerfile** (auto-detected)
+4. Port: **8000**
+5. Click **Deploy** ✅
 
-### Step 3 — Done!
-Koyeb gives you a public URL like:
-```
-https://your-service-name.koyeb.app/
-```
+Koyeb provides a public URL like `https://your-service.koyeb.app/`
 
-Use `/docs` for the interactive Swagger UI.
-
----
-
-## Supported Sites
-Any site supported by yt-dlp — [full list here](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
-Includes: YouTube, Twitter/X, Instagram, TikTok, Reddit, Facebook, Vimeo, Dailymotion, Twitch, and 1000+ more.
+> ⚠️ The Docker image is ~800MB due to Chromium. This is normal and supported on Koyeb.
 
 ---
 
 ## Notes
-- Direct links for YouTube are **time-limited** (expire after a few hours) — that's a YouTube restriction.
-- For best results with age-restricted content, add cookies via yt-dlp's `cookiefile` option.
-- ffmpeg is bundled in the Docker image for merging video+audio streams.
+- YouTube direct links **expire** after a few hours — YouTube's restriction, not an API limitation.
+- For sites requiring login/cookies, yt-dlp's `cookiefile` option can be added.
+- `stream_type` values: `hls`, `dash`, `mp4`, `webm`, `video`, `audio`, `video+audio`, `ts_segment`
