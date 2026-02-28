@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from extractor import extract_links
 import uvicorn
@@ -28,8 +29,11 @@ class LinkRequest(BaseModel):
     timeout: int = 25          # seconds
 
 
-@app.get("/")
+# ── Health / Root ─────────────────────────────────────────────────────────────
+
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
+    """Root endpoint — also handles HEAD for Koyeb health probes."""
     return {
         "message": "Direct Link Grabber API v2 — IDM-style",
         "endpoints": {
@@ -40,10 +44,13 @@ def root():
     }
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
+    """Health check — supports both GET and HEAD (Koyeb probe)."""
     return {"status": "ok"}
 
+
+# ── Grab endpoints ────────────────────────────────────────────────────────────
 
 @app.get("/grab")
 async def grab_get(
