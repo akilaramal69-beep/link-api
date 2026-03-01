@@ -148,3 +148,12 @@ def _pick_best(links: list) -> Optional[str]:
         if link.get("stream_type") == "mp4":
             return link["url"]
     return links[0]["url"]
+
+
+async def extract_raw_ytdlp(url: str) -> dict:
+    """Run yt-dlp on the URL and return the raw info dict untouched."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _ytdlp_extract, url)
+    if not result:
+        raise ValueError(f"No info extracted for {url}")
+    return result

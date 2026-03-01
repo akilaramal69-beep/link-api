@@ -6,6 +6,16 @@ Works on YouTube, Twitter/X, Instagram, TikTok, Reddit, Facebook, Vimeo, Dailymo
 
 ---
 
+## 🤖 Telegram Bot Compatibility (telelinkworking)
+This API includes a dedicated `/extract` endpoint specifically designed to act as a backend for the `telelinkworking` Telegram bot. 
+Set `YT_API_URL` in your bot's `config.env` to your Koyeb deployment URL:
+```
+YT_API_URL=https://your-service.koyeb.app
+```
+The bot will securely offload YouTube (and other) extraction to this API to bypass IP bans and local throttling.
+
+---
+
 ## How It Works
 
 ```
@@ -25,17 +35,27 @@ URL → Headless Chromium loads the page (like a real browser)
 |--------|----------|-------------|
 | `GET`  | `/` | API info |
 | `GET`  | `/health` | Health check |
-| `GET`  | `/grab?url=<URL>` | Extract links (query param) |
-| `POST` | `/grab` | Extract links (JSON body) |
+| `GET`  | `/grab?url=<URL>` | Extract links (custom IDM format) |
+| `POST` | `/grab` | Extract links (JSON body, custom IDM format) |
+| `POST` | `/extract` | **Raw yt-dlp dump** (Exact drop-in for bots) |
 | `GET`  | `/docs` | Swagger UI |
 
-### GET Example
+### POST `/extract` (For Bots)
+```json
+POST /extract
+{
+  "url": "https://youtube.com/watch?v=..."
+}
+```
+*Returns the exact dictionary output of `yt-dlp`'s `extract_info` function.*
+
+### GET `/grab` Example (IDM Style)
 ```
 GET /grab?url=https://example.com/video/123
 GET /grab?url=https://youtu.be/dQw4w9WgXcQ&use_browser=false
 ```
 
-### POST Example
+### POST `/grab` Example (IDM Style)
 ```json
 POST /grab
 {
@@ -44,39 +64,7 @@ POST /grab
   "timeout": 25
 }
 ```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `url` | required | Any video page URL |
-| `use_browser` | `true` | Use Playwright interception |
-| `timeout` | `25` | Timeout in seconds |
-
-### Response
-```json
-{
-  "url": "https://...",
-  "title": "Video Title",
-  "thumbnail": "https://...",
-  "duration": 212.0,
-  "best_link": "https://direct-stream-url...",
-  "total": 5,
-  "links": [
-    {
-      "url": "https://...",
-      "stream_type": "hls",
-      "source": "browser",
-      "has_video": true,
-      "has_audio": true
-    },
-    {
-      "url": "https://...",
-      "stream_type": "mp4",
-      "height": 1080,
-      "source": "ytdlp"
-    }
-  ]
-}
-```
+*Returns a clean, unified JSON with `best_link`, stream types, and browser/ytdlp sources.*
 
 ---
 
@@ -133,10 +121,3 @@ git push -u origin main
 Koyeb provides a public URL like `https://your-service.koyeb.app/`
 
 > ⚠️ The Docker image is ~800MB due to Chromium. This is normal and supported on Koyeb.
-
----
-
-## Notes
-- YouTube direct links **expire** after a few hours — YouTube's restriction, not an API limitation.
-- For sites requiring login/cookies, yt-dlp's `cookiefile` option can be added.
-- `stream_type` values: `hls`, `dash`, `mp4`, `webm`, `video`, `audio`, `video+audio`, `ts_segment`

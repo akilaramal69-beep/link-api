@@ -80,5 +80,15 @@ async def grab_post(request: LinkRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/extract")
+async def extract_post(request: LinkRequest):
+    """Raw yt-dlp extraction for drop-in compatibility with Telegram bots like telelinkworking."""
+    try:
+        from extractor import extract_raw_ytdlp
+        result = await extract_raw_ytdlp(request.url)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
