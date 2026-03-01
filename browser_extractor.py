@@ -20,11 +20,11 @@ MEDIA_URL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Patterns to ignore (ads, trackers, tiny thumbnails, etc.)
+# Patterns to ignore (ads, trackers, image thumbnails, etc.)
+# We removed "preview" and "tracking" because some CDNs use these words in actual video paths!
 IGNORE_PATTERNS = re.compile(
     r"(doubleclick|googlesyndication|adservice|analytics|googletagmanager"
-    r"|thumbnail|poster|preview|sprite|storyboard|\.jpg|\.jpeg|\.png|\.gif|\.webp"
-    r"|/ads/|/ad/|tracking|beacon|pixel)",
+    r"|\.jpg|\.jpeg|\.png|\.gif|\.webp|/ads/|/ad/|beacon|pixel)",
     re.IGNORECASE,
 )
 
@@ -32,7 +32,7 @@ IGNORE_PATTERNS = re.compile(
 MIN_CONTENT_LENGTH = 50_000  # 50 KB
 
 
-async def intercept_browser(url: str, timeout_ms: int = 20000) -> list[dict]:
+async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
     """
     Launch a headless Chromium browser, navigate to the URL, and intercept
     all media/stream network requests — like IDM does.
@@ -68,28 +68,28 @@ async def intercept_browser(url: str, timeout_ms: int = 20000) -> list[dict]:
 
         async def on_request(request: Request):
             req_url = request.url
-            if IGNORE_PATTERNS.search(req_url):
+            if IGNORE_PATTERNS.search(req_url) and not MEDIA_URL_PATTERNS.search(req_url):
                 return
-
-            # Match by URL pattern
             if MEDIA_URL_PATTERNS.search(req_url):
                 _add_media_entry(found, req_url, source="url_pattern", request=request)
 
         async def on_response(response):
             try:
                 resp_url = response.url
-                if IGNORE_PATTERNS.search(resp_url):
+                
+                # If it's explicitly a media pattern, we don't care if it matches an ignore pattern!
+                is_media_url = bool(MEDIA_URL_PATTERNS.search(resp_url))
+                
+                if not is_media_url and IGNORE_PATTERNS.search(resp_url):
                     return
 
                 content_type = response.headers.get("content-type", "")
                 content_length = int(response.headers.get("content-length", "0") or "0")
 
                 is_media_type = any(mt in content_type.lower() for mt in MEDIA_CONTENT_TYPES)
-                is_media_url = bool(MEDIA_URL_PATTERNS.search(resp_url))
 
                 if is_media_type or is_media_url:
-                    # Filter out tiny responses (icons, thumbnails)
-                    if content_length > 0 and content_length < MIN_CONTENT_LENGTH:
+                    if content_length > 0 and content_length < MIN_CONTENT_LENGTH and not is_media_url:
                         return
                     _add_media_entry(
                         found,
@@ -106,43 +106,43 @@ async def intercept_browser(url: str, timeout_ms: int = 20000) -> list[dict]:
 
         try:
             await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-            # Give the page extra time to start media streams
             await asyncio.sleep(5)
 
-            # Try clicking play buttons to trigger video loading
-            for selector in [
-                "button[aria-label*='play' i]",
-                "button[class*='play' i]",
-                ".play-button",
-                ".ytp-play-button",
-                "video",
-                "[data-testid*='play' i]",
-            ]:
+            frames = page.frames
+            for frame in frames:
+                for selector in [
+                    "button[aria-label*='play' i]",
+                    "button[class*='play' i]",
+                    ".play-button",
+                    ".ytp-play-button",
+                    ".vjs-big-play-button",
+                    "video",
+                    "[data-testid*='play' i]",
+                ]:
+                    try:
+                        el = await frame.query_selector(selector)
+                        if el:
+                            await el.click(timeout=1500)
+                            await asyncio.sleep(2)
+                            break
+                    except Exception:
+                        pass
+
+            for frame in frames:
                 try:
-                    el = await page.query_selector(selector)
-                    if el:
-                        await el.click(timeout=2000)
-                        await asyncio.sleep(3)
-                        break
+                    dom_links = await frame.evaluate("""() => {
+                        const urls = new Set();
+                        document.querySelectorAll('video, audio, source').forEach(el => {
+                            if (el.src) urls.add(el.src);
+                            if (el.currentSrc) urls.add(el.currentSrc);
+                        });
+                        return Array.from(urls).filter(u => u.startsWith('http'));
+                    }""")
+                    for link in dom_links:
+                        if MEDIA_URL_PATTERNS.search(link) or not IGNORE_PATTERNS.search(link):
+                            _add_media_entry(found, link, source="dom")
                 except Exception:
                     pass
-
-            # Also extract <video> / <source> / <audio> src attributes from DOM
-            dom_links = await page.evaluate("""() => {
-                const urls = new Set();
-                document.querySelectorAll('video, audio, source').forEach(el => {
-                    if (el.src) urls.add(el.src);
-                    if (el.currentSrc) urls.add(el.currentSrc);
-                });
-                document.querySelectorAll('source').forEach(el => {
-                    if (el.src) urls.add(el.src);
-                });
-                return Array.from(urls).filter(u => u.startsWith('http'));
-            }""")
-
-            for link in dom_links:
-                if not IGNORE_PATTERNS.search(link):
-                    _add_media_entry(found, link, source="dom")
 
         except Exception as e:
             if not found:
