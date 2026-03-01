@@ -12,8 +12,9 @@ Strategy:
 
 import asyncio
 import yt_dlp
+import re
 from typing import Optional
-from browser_extractor import intercept_browser
+from browser_extractor import intercept_browser, MEDIA_URL_PATTERNS
 
 
 async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -> dict:
@@ -21,10 +22,21 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
     ytdlp_result = None
     errors = []
 
+    # ── Strategy 0: Check if URL is already a direct media link ────────────────
+    is_direct = bool(MEDIA_URL_PATTERNS.search(url.split('?')[0]))
+
     # ── Strategy 1: Headless browser interception ──────────────────────────────
     if use_browser:
         try:
-            browser_results = await intercept_browser(url, timeout_ms=timeout * 1000)
+            if not is_direct:
+                browser_results = await intercept_browser(url, timeout_ms=timeout * 1000)
+            else:
+                # Add the direct link to browser_results manually
+                browser_results = [{
+                    "url": url,
+                    "stream_type": _guess_type_from_url(url),
+                    "source": "direct_input"
+                }]
         except Exception as e:
             errors.append(f"browser_error: {e}")
 
@@ -60,15 +72,21 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
     # Merge browser links + yt-dlp formats
     # Filter browser results to remove likely ads (very small files that aren't HLS)
     filtered_browser_links = []
+    AD_KEYWORDS = ("ads", "vast", "click", "pop", "preroll", "midroll", "postroll", "sponsored")
+    
     for link in browser_results:
+        # If it's a known ad domain or has ad keywords, skip it entirely
+        if any(k in link["url"].lower() for k in AD_KEYWORDS):
+            continue
+
         # If it's HLS, we keep it (playlists are small)
         if link.get("stream_type") == "hls":
             filtered_browser_links.append(link)
             continue
             
-        # If it has a known content length and it's tiny (< 1MB), it's likely an ad or segment
+        # If it has a known content length and it's tiny (< 1.5MB), it's likely an ad or segment
         length = link.get("content_length")
-        if length and length < 1_000_000: # 1MB
+        if length and length < 1_500_000:
             continue
             
         filtered_browser_links.append(link)
@@ -156,33 +174,56 @@ def _pick_best(links: list) -> Optional[str]:
         return None
         
     # Strictly prefer HLS > video+audio > mp4
-    for link in links:
+    AD_KEYWORDS = ("ads", "vast", "crossdomain", "traffic", "click", "pop", "pre-roll")
+    
+    clean_links = [
+        l for l in links 
+        if not any(k in l["url"].lower() for k in AD_KEYWORDS)
+    ]
+    
+    target_links = clean_links if clean_links else links
+
+    # 1. Prefer HLS (Master playlists)
+    for link in target_links:
+        if link.get("stream_type") == "hls" and "m3u8" in link["url"]:
+            if any(k in link["url"].lower() for k in ("master", "playlist", "index", "manifest")):
+                return link["url"]
+            
+    for link in target_links:
         if link.get("stream_type") == "hls":
             return link["url"]
             
-    for link in links:
+    # 2. Prefer combined video+audio
+    for link in target_links:
         if link.get("has_video") and link.get("has_audio"):
             return link["url"]
             
-    for link in links:
+    # 3. Prefer MP4
+    for link in target_links:
         if link.get("stream_type") == "mp4":
             return link["url"]
             
-    # As a last resort, pick anything that isn't 'unknown' or 'audio' if possible
-    for link in links:
+    # 4. Filter by filesize if unknown
+    for link in target_links:
         if link.get("stream_type") not in ("unknown", "audio"):
             return link["url"]
             
-    # Absolute last resort
-    return links[0]["url"]
+    return target_links[0]["url"]
+
+
+def _guess_type_from_url(url: str) -> str:
+    path = url.split('?')[0].lower()
+    if ".m3u8" in path: return "hls"
+    if ".mpd" in path: return "dash"
+    if ".mp4" in path: return "mp4"
+    if ".webm" in path: return "webm"
+    return "unknown"
 
 
 async def extract_raw_ytdlp(url: str) -> dict:
-    """Run yt-dlp on the URL. If it fails or yields no formats, fallback to Playwright
-    and format the results as a fake yt-dlp info dict so the bot understands it."""
+    """Run yt-dlp on the URL. If it fails or yields no formats, fallback to Playwright."""
     loop = asyncio.get_event_loop()
     
-    # Optional shortcut for obvious non-yt-dlp sites
     is_known = any(d in url.lower() for d in [
         "youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com", 
         "tiktok.com", "reddit.com", "facebook.com", "vimeo.com"
@@ -195,37 +236,56 @@ async def extract_raw_ytdlp(url: str) -> dict:
         except Exception:
             pass
 
-    # If yt-dlp gave us good formats, just return it directly (bot drops-in perfectly)
     if ytdlp_info and ytdlp_info.get("formats"):
         return ytdlp_info
 
-    # Otherwise (like milfnut.com), run our browser interception!
+    # Otherwise, run browser interception (or handle direct link)
     try:
-        browser_results = await intercept_browser(url, timeout_ms=25000)
+        is_direct = bool(MEDIA_URL_PATTERNS.search(url.split('?')[0]))
+        if is_direct:
+            browser_results = [{
+                "url": url,
+                "stream_type": _guess_type_from_url(url),
+                "source": "direct_input"
+            }]
+        else:
+            browser_results = await intercept_browser(url, timeout_ms=25000)
     except Exception as e:
         raise ValueError(f"Both yt-dlp and browser interception failed: {e}")
 
-    # Filter browser results to remove likely ads (very small files that aren't HLS)
+    # Filter results
     filtered_browser_links = []
+    AD_KEYWORDS = ("ads", "vast", "click", "pop", "preroll", "midroll", "postroll", "sponsored")
+    
     for link in browser_results:
-        # If it's HLS, we keep it (playlists are small)
+        if any(k in link["url"].lower() for k in AD_KEYWORDS):
+            continue
         if link.get("stream_type") == "hls":
             filtered_browser_links.append(link)
             continue
-            
-        # If it has a known content length and it's tiny (< 1MB), it's likely an ad or segment
         length = link.get("content_length")
-        if length and length < 1_000_000: # 1MB
+        if length and length < 1_500_000:
             continue
-            
         filtered_browser_links.append(link)
 
     if not filtered_browser_links:
         if ytdlp_info:
-            return ytdlp_info  # return the empty ytdlp dict
-        raise ValueError("Could not extract any media links from this page.")
+            return ytdlp_info
+        if browser_results:
+             filtered_browser_links = [browser_results[0]]
+        else:
+            raise ValueError("Could not extract any media links from this page.")
 
-    # Fabricate a fake yt-dlp dictionary perfectly tailored for `telelinkworking` plugin
+    # Sort candidates
+    filtered_browser_links.sort(
+        key=lambda x: (
+            x.get("stream_type") == "hls",
+            any(k in x["url"].lower() for k in ("master", "playlist", "index")),
+            x.get("content_length") or 0
+        ),
+        reverse=True
+    )
+
     fake_info = {
         "id": "browser_extract",
         "title": "Extracted Video",
@@ -238,12 +298,11 @@ async def extract_raw_ytdlp(url: str) -> dict:
         fmt = {
             "format_id": f"browser_{i}",
             "url": link["url"],
-            "ext": "mp4", # Bot generally prefers mp4 default
+            "ext": (link.get("content_type") or "").split("/")[-1] or "mp4",
             "vcodec": "avc1" if link.get("stream_type") in ("mp4", "hls", "dash", "video") else "none",
             "acodec": "mp4a" if link.get("stream_type") in ("mp4", "hls", "dash", "audio", "video") else "none",
         }
         
-        # Make HLS look like standard yt-dlp HLS formats
         if link.get("stream_type") == "hls":
             fmt["protocol"] = "m3u8_native"
             fmt["ext"] = "mp4"
@@ -253,11 +312,8 @@ async def extract_raw_ytdlp(url: str) -> dict:
             fmt["ext"] = "m4a"
             fmt["format_note"] = "Audio Stream"
             
-        # Hardcode a resolution so the bot's format selector UI works (it expects things like 720p)
         fmt["width"] = 1280
         fmt["height"] = 720
-        
-        # Inject standard byte size if known
         if link.get("content_length"):
             fmt["filesize"] = link["content_length"]
             
