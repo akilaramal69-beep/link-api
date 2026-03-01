@@ -2,29 +2,36 @@
 
 An IDM-style REST API that extracts **direct download links** from video URLs on **any website** — powered by **Playwright** (headless browser interception) + **yt-dlp** fallback.
 
-Works on YouTube, Twitter/X, Instagram, TikTok, Reddit, Facebook, Vimeo, Dailymotion, Twitch, and virtually **any site that streams video in a browser**.
+Works on YouTube, Twitter/X, Instagram, TikTok, Reddit, Facebook, Vimeo, Dailymotion, Twitch, and virtually **any site that streams video in a browser** (even unsupported sites like `milfnut.com`!).
 
 ---
 
-## 🤖 Telegram Bot Compatibility (telelinkworking)
-This API includes a dedicated `/extract` endpoint specifically designed to act as a backend for the `telelinkworking` Telegram bot. 
+## 🤖 Universal Telegram Bot Compatibility
+This API includes a dedicated `/extract` endpoint specifically designed to act as a **drop-in backend replacing yt-dlp** for bots like `telelinkworking`. 
+
 Set `YT_API_URL` in your bot's `config.env` to your Koyeb deployment URL:
 ```
 YT_API_URL=https://your-service.koyeb.app
 ```
-The bot will securely offload YouTube (and other) extraction to this API to bypass IP bans and local throttling.
+
+**What makes this special?**
+If your bot sends an unsupported URL (like `milfnut.com`), or if `yt-dlp` is temporarily blocked by YouTube, the API seamlessly spins up its IDM-style headless browser. It traverses all `iframes`, intercepts the raw `.m3u8` or `.mp4` video files, and **fabricates a perfect fake yt-dlp response**. Your bot will magically process it as if `yt-dlp` natively supported the website!
 
 ---
 
 ## How It Works
 
 ```
-URL → Headless Chromium loads the page (like a real browser)
-    → Intercepts all network requests (MP4, HLS .m3u8, DASH .mpd, WebM, audio...)
-    → Tries to auto-click play buttons to trigger lazy-loaded streams
-    → Reads <video>/<source> DOM elements
-    → yt-dlp enriches results for known platforms (YouTube, Twitter, etc.)
-    → Returns unified list of direct links + best pick
+API Request (Any URL)
+  │
+  ├── 1. Try yt-dlp extraction (Fastest, best metadata)
+  │
+  └── 2. IF yt-dlp fails (Unsupported site / Blocked):
+         ├── Launch Headless Chromium browser
+         ├── Traverse all iframes & click Play buttons
+         ├── Intercept raw IDM network requests (.mp4, .m3u8, .ts, etc)
+         ├── Ignore ads/trackers
+         └── Format links into a unified JSON structure
 ```
 
 ---
@@ -37,17 +44,17 @@ URL → Headless Chromium loads the page (like a real browser)
 | `GET`  | `/health` | Health check |
 | `GET`  | `/grab?url=<URL>` | Extract links (custom IDM format) |
 | `POST` | `/grab` | Extract links (JSON body, custom IDM format) |
-| `POST` | `/extract` | **Raw yt-dlp dump** (Exact drop-in for bots) |
-| `GET`  | `/docs` | Swagger UI |
+| `POST` | `/extract` | **yt-dlp JSON dump** (Provides seamless Playwright fallback) |
 
 ### POST `/extract` (For Bots)
 ```json
 POST /extract
 {
-  "url": "https://youtube.com/watch?v=..."
+  "url": "https://milfnut.com/..."
 }
 ```
-*Returns the exact dictionary output of `yt-dlp`'s `extract_info` function.*
+*Returns the exact dictionary output of `yt-dlp`. If yt-dlp fails, it returns a fake yt-dlp dictionary populated with Playwright-intercepted links.* 
+*(Note: Never returns HTTP 400 errors for extraction failures to prevent bots from falling back to downloading HTML web pages. It instead returns a 200 OK with `{"formats": []}`).*
 
 ### GET `/grab` Example (IDM Style)
 ```
@@ -73,8 +80,8 @@ POST /grab
 ```
 .
 ├── main.py              # FastAPI app
-├── extractor.py         # Orchestrator (browser → yt-dlp fallback)
-├── browser_extractor.py # Playwright interception engine
+├── extractor.py         # Orchestrator (browser → yt-dlp fallback logic)
+├── browser_extractor.py # Playwright IDM interception engine
 ├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yml   # Local testing
@@ -120,4 +127,4 @@ git push -u origin main
 
 Koyeb provides a public URL like `https://your-service.koyeb.app/`
 
-> ⚠️ The Docker image is ~800MB due to Chromium. This is normal and supported on Koyeb.
+> ⚠️ The Docker image is ~800MB due to Chromium. This is normal and fully supported on Koyeb.

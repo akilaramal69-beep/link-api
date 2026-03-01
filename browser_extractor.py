@@ -24,7 +24,8 @@ MEDIA_URL_PATTERNS = re.compile(
 # We removed "preview" and "tracking" because some CDNs use these words in actual video paths!
 IGNORE_PATTERNS = re.compile(
     r"(doubleclick|googlesyndication|adservice|analytics|googletagmanager"
-    r"|\.jpg|\.jpeg|\.png|\.gif|\.webp|/ads/|/ad/|beacon|pixel)",
+    r"|\.jpg|\.jpeg|\.png|\.gif|\.webp|\.svg|\.ico|\.css|\.js|\.woff|\.ttf"
+    r"|/ads/|/ad/|beacon|pixel)",
     re.IGNORECASE,
 )
 
@@ -85,6 +86,10 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
 
                 content_type = response.headers.get("content-type", "")
                 content_length = int(response.headers.get("content-length", "0") or "0")
+                
+                # Double check to prevent intercepting explicit image responses
+                if "image/" in content_type or "text/" in content_type:
+                    return
 
                 is_media_type = any(mt in content_type.lower() for mt in MEDIA_CONTENT_TYPES)
 
@@ -139,8 +144,12 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                         return Array.from(urls).filter(u => u.startsWith('http'));
                     }""")
                     for link in dom_links:
-                        if MEDIA_URL_PATTERNS.search(link) or not IGNORE_PATTERNS.search(link):
-                            _add_media_entry(found, link, source="dom")
+                        # Stricter parsing: DOM elements often have poster images in the src if we aren't careful
+                        if IGNORE_PATTERNS.search(link) and not MEDIA_URL_PATTERNS.search(link):
+                            continue
+                            
+                        # If we get here, it's either an explicit media pattern or not an ignored image/text pattern
+                        _add_media_entry(found, link, source="dom")
                 except Exception:
                     pass
 

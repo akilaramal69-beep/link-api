@@ -138,15 +138,26 @@ def _guess_type_ytdlp(fmt: dict) -> str:
 def _pick_best(links: list) -> Optional[str]:
     if not links:
         return None
+        
+    # Strictly prefer HLS > video+audio > mp4
     for link in links:
         if link.get("stream_type") == "hls":
             return link["url"]
+            
     for link in links:
         if link.get("has_video") and link.get("has_audio"):
             return link["url"]
+            
     for link in links:
         if link.get("stream_type") == "mp4":
             return link["url"]
+            
+    # As a last resort, pick anything that isn't 'unknown' or 'audio' if possible
+    for link in links:
+        if link.get("stream_type") not in ("unknown", "audio"):
+            return link["url"]
+            
+    # Absolute last resort
     return links[0]["url"]
 
 
