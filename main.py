@@ -81,11 +81,16 @@ async def grab_post(request: LinkRequest):
 
 
 @app.post("/extract")
-async def extract_post(request: LinkRequest):
+async def extract_post(request: Request):
     """Raw yt-dlp extraction for drop-in compatibility with Telegram bots like telelinkworking."""
     try:
+        data = await request.json()
+        url = data.get("url")
+        if not url:
+            raise ValueError("Missing 'url' in JSON body")
+            
         from extractor import extract_raw_ytdlp
-        result = await extract_raw_ytdlp(request.url)
+        result = await extract_raw_ytdlp(url)
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
