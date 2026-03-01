@@ -11,7 +11,6 @@ Strategy:
 """
 
 import asyncio
-import yt_dlp
 import re
 from typing import Optional
 from browser_extractor import intercept_browser, MEDIA_URL_PATTERNS
@@ -26,7 +25,6 @@ SEGMENT_PATTERNS = re.compile(
 
 async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -> dict:
     browser_results = []
-    ytdlp_result = None
     errors = []
 
     # ── Strategy 0: Check if URL is already a direct media link ────────────────
@@ -47,14 +45,7 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
         except Exception as e:
             errors.append(f"browser_error: {e}")
 
-    # ── Strategy 2: yt-dlp (always attempted as fallback / enrichment) ─────────
-    try:
-        loop = asyncio.get_event_loop()
-        ytdlp_result = await loop.run_in_executor(None, _ytdlp_extract, url)
-    except Exception as e:
-        errors.append(f"ytdlp_error: {e}")
-
-    if not browser_results and ytdlp_result is None:
+    if not browser_results:
         raise RuntimeError(
             f"Could not extract any links. Details — {'; '.join(errors)}"
         )
@@ -62,19 +53,12 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
     # ── Build unified response ─────────────────────────────────────────────────
     response: dict = {
         "url": url,
-        "title": None,
+        "title": "Extracted Video",
         "thumbnail": None,
         "duration": None,
-        "extractor": None,
+        "extractor": "BrowserIntercept",
         "uploader": None,
     }
-
-    if ytdlp_result:
-        response["title"] = ytdlp_result.get("title")
-        response["thumbnail"] = ytdlp_result.get("thumbnail")
-        response["duration"] = ytdlp_result.get("duration")
-        response["extractor"] = ytdlp_result.get("extractor")
-        response["uploader"] = ytdlp_result.get("uploader")
 
     # Merge browser links + yt-dlp formats
     # Filter browser results to remove likely ads (very small files that aren't HLS)
@@ -112,26 +96,6 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
 
     all_links = list(filtered_browser_links)
 
-    if ytdlp_result:
-        for fmt in ytdlp_result.get("formats", []):
-            if not fmt.get("url"):
-                continue
-            all_links.append({
-                "url": fmt["url"],
-                "stream_type": _guess_type_ytdlp(fmt),
-                "content_type": fmt.get("ext"),
-                "height": fmt.get("height"),
-                "fps": fmt.get("fps"),
-                "tbr": fmt.get("tbr"),
-                "vcodec": fmt.get("vcodec"),
-                "acodec": fmt.get("acodec"),
-                "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
-                "format_note": fmt.get("format_note"),
-                "has_video": fmt.get("vcodec", "none") != "none",
-                "has_audio": fmt.get("acodec", "none") != "none",
-                "source": "ytdlp",
-            })
-
     # Deduplicate by URL
     seen = set()
     unique_links = []
@@ -159,33 +123,6 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
     return response
 
 
-def _ytdlp_extract(url: str) -> Optional[dict]:
-    opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "age_limit": 99,
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(url, download=False)
-
-
-def _guess_type_ytdlp(fmt: dict) -> str:
-    ext = fmt.get("ext", "").lower()
-    vcodec = fmt.get("vcodec", "none")
-    acodec = fmt.get("acodec", "none")
-    if ext in ("m3u8", "m3u"):
-        return "hls"
-    if ext == "mpd":
-        return "dash"
-    if vcodec != "none" and acodec != "none":
-        return "video+audio"
-    if vcodec != "none":
-        return "video"
-    if acodec != "none":
-        return "audio"
-    return ext or "unknown"
 
 
 def _pick_best(links: list) -> Optional[str]:
@@ -277,25 +214,7 @@ def _guess_type_from_url(url: str) -> str:
 
 
 async def extract_raw_ytdlp(url: str) -> dict:
-    """Run yt-dlp on the URL. If it fails or yields no formats, fallback to Playwright."""
-    loop = asyncio.get_event_loop()
-    
-    is_known = any(d in url.lower() for d in [
-        "youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com", 
-        "tiktok.com", "reddit.com", "facebook.com", "vimeo.com"
-    ])
-    
-    ytdlp_info = None
-    if is_known:
-        try:
-            ytdlp_info = await loop.run_in_executor(None, _ytdlp_extract, url)
-        except Exception:
-            pass
-
-    if ytdlp_info and ytdlp_info.get("formats"):
-        return ytdlp_info
-
-    # Otherwise, run browser interception (or handle direct link)
+    """Run browser interception (yt-dlp removed)."""
     try:
         is_direct = bool(MEDIA_URL_PATTERNS.search(url.split('?')[0]))
         if is_direct:
@@ -307,7 +226,7 @@ async def extract_raw_ytdlp(url: str) -> dict:
         else:
             browser_results = await intercept_browser(url, timeout_ms=25000)
     except Exception as e:
-        raise ValueError(f"Both yt-dlp and browser interception failed: {e}")
+        raise ValueError(f"Browser interception extraction failed: {e}")
 
     # Filter results
     filtered_browser_links = []
@@ -331,8 +250,6 @@ async def extract_raw_ytdlp(url: str) -> dict:
         filtered_browser_links.append(link)
 
     if not filtered_browser_links:
-        if ytdlp_info:
-            return ytdlp_info
         raise ValueError(f"Could not extract any valid media links from: {url}")
 
     # Sort candidates
