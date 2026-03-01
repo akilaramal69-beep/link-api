@@ -41,8 +41,11 @@ MIN_CONTENT_LENGTH = 50_000  # 50 KB
 # JS Sniffer Script to be injected into every page/iframe (1DM-style)
 SNIFFER_JS = """
 (function() {
+    const seenUrls = new Set();
     const logMedia = (url, source) => {
         if (!url || typeof url !== 'string' || url.startsWith('blob:') || url.startsWith('data:')) return;
+        if (seenUrls.has(url)) return;
+        seenUrls.add(url);
         if (window.pythonSniff) {
             window.pythonSniff(url, source);
         }
@@ -64,11 +67,17 @@ SNIFFER_JS = """
     const monitorElement = (el) => {
         if (el._sniffed) return;
         el._sniffed = true;
-        ['loadstart', 'play', 'playing', 'loadedmetadata'].forEach(ev => {
+        ['loadstart', 'play', 'playing', 'loadedmetadata', 'canplay'].forEach(ev => {
             el.addEventListener(ev, () => {
                 logMedia(el.src || el.currentSrc, 'media_event_' + ev);
             }, { passive: true });
         });
+        
+        // 1DM Bonus: Check for VideoJS or similar player on the element
+        if (el.player) {
+             const p = el.player;
+             if (p.currentSrc && typeof p.currentSrc === 'function') logMedia(p.currentSrc(), 'videojs_src');
+        }
     };
 
     document.querySelectorAll('video, audio').forEach(monitorElement);
@@ -84,18 +93,33 @@ SNIFFER_JS = """
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    // 4. Periodically check currentSrc (fallback)
+    // 4. Periodically check currentSrc (fallback) - faster check
     setInterval(() => {
         document.querySelectorAll('video, audio').forEach(el => {
             logMedia(el.currentSrc || el.src, 'media_poll');
         });
-    }, 2000);
+    }, 1000);
 
-    // 5. Hook window.open (catch multi-parameter download links opened in new tabs)
+    // 5. Hook window.open
     const originalOpen = window.open;
     window.open = function(url, name, specs) {
         logMedia(url, 'window_open');
         return originalOpen.apply(this, arguments);
+    };
+
+    // 6. Hook fetch to catch JSON responses that might contain media URLs
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        const clone = response.clone();
+        try {
+            const data = await clone.text();
+            if (data.includes('.m3u8') || data.includes('.mp4')) {
+                const matches = data.match(/https?:\\?\\?\/\\?\\?\/[^"']+\.(m3u8|mp4|mpd)/g);
+                if (matches) matches.forEach(m => logMedia(m.replace(/\\\\/g, ''), 'fetch_intercept'));
+            }
+        } catch(e) {}
+        return response;
     };
 })();
 """
@@ -136,7 +160,7 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
 
         # ── 1DM Hardening: Block useless resources (BUT KEEP CSS) ─────────────
         async def block_resources(route):
-            # We NEED CSS for elements to be 'visible' and 'clickable' properly
+            # We NEED CSS & IFRAMES for elements to be 'visible' and 'clickable' properly
             if route.request.resource_type in ["image", "media", "font"]:
                 await route.abort()
             else:
@@ -210,7 +234,7 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                     if attempt == 1: raise e
                     await asyncio.sleep(2)
 
-            await asyncio.sleep(8) # Wait extra for 1DM-style sniffing to fire
+            await asyncio.sleep(12.0) # Wait extra for 1DM-style sniffing to fire
 
             # Aggressive discovery: loop through frames and click/sniff
             frames = page.frames
@@ -242,27 +266,26 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                 
                 for selector in selectors:
                     try:
-                        el = await frame.query_selector(selector)
-                        if el:
-                            await el.click(timeout=2000, no_wait_after=True)
-                            await asyncio.sleep(2)
+                        elements = await frame.query_selector_all(selector)
+                        for el in elements:
+                            if await el.is_visible():
+                                await el.click(timeout=2000, no_wait_after=True)
+                                await asyncio.sleep(1)
                             
-                            # If a menu appeared, try to click quality options
-                            # e.g. 480p, 720p, 1080p, MP4, etc.
-                            # We use even more generic matching now
-                            sub_selectors = [
-                                "li:has-text('p')", "a:has-text('p')", # Matches 480p, 720p
-                                "li:has-text('MP4')", "a:has-text('MP4')",
-                                "li:has-text('Download')", "a:has-text('Download')"
-                            ]
-                            for sub in sub_selectors:
-                                try:
-                                    sub_el = await frame.query_selector(sub)
-                                    if sub_el and await sub_el.is_visible():
-                                        await sub_el.click(timeout=1000, no_wait_after=True)
-                                        await asyncio.sleep(1)
-                                except Exception:
-                                    pass
+                                # If a menu appeared, try to click quality options
+                                sub_selectors = [
+                                    "li:has-text('p')", "a:has-text('p')",
+                                    "li:has-text('MP4')", "a:has-text('MP4')",
+                                    "li:has-text('Download')", "a:has-text('Download')"
+                                ]
+                                for sub in sub_selectors:
+                                    try:
+                                        sub_el = await frame.query_selector(sub)
+                                        if sub_el and await sub_el.is_visible():
+                                            await sub_el.click(timeout=1000, no_wait_after=True)
+                                            await asyncio.sleep(1)
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
 
