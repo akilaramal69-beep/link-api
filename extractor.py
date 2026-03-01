@@ -261,10 +261,10 @@ def _pick_best(links: list) -> Optional[str]:
     # (Checking against common non-media patterns one last time)
     for link in target_links:
         u = link["url"].lower()
-        if not any(k in u for k in (".php", ".html", ".htm")):
+        if not any(k in u for k in (".php", ".html", ".htm", ".jsp", ".aspx")):
             return link["url"]
             
-    return target_links[0]["url"]
+    return None # Return None if we can't find a high-confidence clean link
 
 
 def _guess_type_from_url(url: str) -> str:
@@ -333,10 +333,7 @@ async def extract_raw_ytdlp(url: str) -> dict:
     if not filtered_browser_links:
         if ytdlp_info:
             return ytdlp_info
-        if browser_results:
-             filtered_browser_links = [browser_results[0]]
-        else:
-            raise ValueError("Could not extract any media links from this page.")
+        raise ValueError(f"Could not extract any valid media links from: {url}")
 
     # Sort candidates
     filtered_browser_links.sort(

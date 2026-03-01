@@ -61,9 +61,13 @@ async def grab_get(
     """Extract direct media links from any video URL."""
     try:
         result = await extract_links(url, use_browser=use_browser, timeout=timeout)
+        if not result.get("links"):
+             raise HTTPException(status_code=400, detail=f"No media links found for: {url}")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Extraction error: {str(e)}")
 
 
 @app.post("/grab")
@@ -75,9 +79,13 @@ async def grab_post(request: LinkRequest):
             use_browser=request.use_browser,
             timeout=request.timeout,
         )
+        if not result.get("links"):
+            raise HTTPException(status_code=400, detail=f"No media links found for: {request.url}")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Extraction error: {str(e)}")
 
 
 @app.post("/extract")

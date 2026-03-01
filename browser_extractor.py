@@ -15,9 +15,9 @@ MEDIA_CONTENT_TYPES = (
 
 # URL patterns that indicate video/audio streams
 # 1DM Hardening: Relaxed to catch extensions even if buried in parameters.
-# Also specifically added 'remote_control.php' which is a known media script.
+# We now require a leading dot to avoid matching extensions inside other words.
 MEDIA_URL_PATTERNS = re.compile(
-    r"(\.(mp4|m3u8|m4v|m4a|mpd|ts|webm|mkv|flv|avi|mov|aac|mp3|ogg|opus)([?&]|$|(?=&)))|remote_control\.php",
+    r"(\.(mp4|m3u8|m4v|m4a|mpd|ts|webm|mkv|flv|avi|mov|aac|mp3|ogg|opus)([?&]|$))|remote_control\.php",
     re.IGNORECASE,
 )
 
@@ -174,8 +174,12 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                 content_type = response.headers.get("content-type", "").lower()
                 content_length = int(response.headers.get("content-length", "0") or "0")
                 
-                # Strict: Ignore anything that is explicitly text or html
+                # Strict: Ignore anything that is explicitly text or html or json
                 if "text/" in content_type or "html" in content_type or "json" in content_type:
+                    return
+
+                # Even if the URL matches, if the content-type is HTML, it's NOT a media file
+                if "html" in content_type:
                     return
 
                 is_media_type = any(mt in content_type for mt in MEDIA_CONTENT_TYPES)
