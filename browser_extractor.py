@@ -15,8 +15,10 @@ MEDIA_CONTENT_TYPES = (
 )
 
 # URL patterns that indicate video/audio streams
+# 1DM Hardening: Relaxed to catch extensions even if buried in parameters.
+# Also specifically added 'remote_control.php' which is a known media script.
 MEDIA_URL_PATTERNS = re.compile(
-    r"\.(mp4|m3u8|m4v|m4a|mpd|ts|webm|mkv|flv|avi|mov|aac|mp3|ogg|opus)(\?|$)",
+    r"(\.(mp4|m3u8|m4v|m4a|mpd|ts|webm|mkv|flv|avi|mov|aac|mp3|ogg|opus)([?&]|$|(?=&)))|remote_control\.php",
     re.IGNORECASE,
 )
 
@@ -89,6 +91,13 @@ SNIFFER_JS = """
             logMedia(el.currentSrc || el.src, 'media_poll');
         });
     }, 2000);
+
+    // 5. Hook window.open (catch multi-parameter download links opened in new tabs)
+    const originalOpen = window.open;
+    window.open = function(url, name, specs) {
+        logMedia(url, 'window_open');
+        return originalOpen.apply(this, arguments);
+    };
 })();
 """
 
@@ -126,10 +135,17 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
 
         page = await context.new_page()
 
+        # ── 1DM Hardening: Block useless resources (BUT KEEP CSS) ─────────────
+        async def block_resources(route):
+            # We NEED CSS for elements to be 'visible' and 'clickable' properly
+            if route.request.resource_type in ["image", "media", "font"]:
+                await route.abort()
+            else:
+                await route.continue_()
+        await page.route("**/*", block_resources)
+
         # ── 1DM Hardening: Block Popups & Dialogs ─────────────────────────────
-        # Close any popup windows immediately (click-unders)
         page.on("popup", lambda p: asyncio.create_task(p.close()))
-        # Automatically dismiss alerts/prompts (ad-scams)
         page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
 
         # Binding to receive JS-discovered links
@@ -181,7 +197,15 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
         page.on("response", on_response)
 
         try:
-            await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            # Navigation Retry Logic
+            for attempt in range(2):
+                try:
+                    await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                    break
+                except Exception as e:
+                    if attempt == 1: raise e
+                    await asyncio.sleep(2)
+
             await asyncio.sleep(8) # Wait extra for 1DM-style sniffing to fire
 
             # Aggressive discovery: loop through frames and click/sniff
@@ -203,20 +227,38 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                 except Exception:
                     pass
 
-                # 2. Trigger play buttons
-                for selector in [
-                    "button[aria-label*='play' i]",
-                    "button[class*='play' i]",
-                    ".play-button",
-                    "video",
-                    "[data-testid*='play' i]",
-                ]:
+                # 2. Trigger play/download buttons
+                # We also look for dropdowns and click the children (1DM style)
+                selectors = [
+                    "button[aria-label*='play' i]", "button[class*='play' i]",
+                    "button:has-text('Download')", "a:has-text('Download')",
+                    "div.download", ".download-button", ".play-button",
+                    "video", "[data-testid*='play' i]"
+                ]
+                
+                for selector in selectors:
                     try:
                         el = await frame.query_selector(selector)
                         if el:
-                            await el.click(timeout=1500)
+                            await el.click(timeout=2000, no_wait_after=True)
                             await asyncio.sleep(2)
-                            break
+                            
+                            # If a menu appeared, try to click quality options
+                            # e.g. 480p, 720p, 1080p, MP4, etc.
+                            # We use even more generic matching now
+                            sub_selectors = [
+                                "li:has-text('p')", "a:has-text('p')", # Matches 480p, 720p
+                                "li:has-text('MP4')", "a:has-text('MP4')",
+                                "li:has-text('Download')", "a:has-text('Download')"
+                            ]
+                            for sub in sub_selectors:
+                                try:
+                                    sub_el = await frame.query_selector(sub)
+                                    if sub_el and await sub_el.is_visible():
+                                        await sub_el.click(timeout=1000, no_wait_after=True)
+                                        await asyncio.sleep(1)
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
 

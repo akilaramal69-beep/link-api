@@ -186,44 +186,68 @@ def _pick_best(links: list) -> Optional[str]:
         return None
         
     # Strictly prefer HLS > video+audio > mp4
-    AD_KEYWORDS = ("ads", "vast", "crossdomain", "traffic", "click", "pop", "pre-roll")
+    # Expanded Ad-Shield: Check URL AND Referer for ad patterns
+    AD_KEYWORDS = (
+        "ads", "vast", "crossdomain", "traffic", "click", "pop", "pre-roll", 
+        "mid-roll", "post-roll", "creative", "affiliate", "tracking", "pixel"
+    )
+    AD_DOMAINS = ("contentabc.com", "exoclick.com", "doubleclick.net", "googlesyndication.com")
     
-    clean_links = [
-        l for l in links 
-        if not any(k in l["url"].lower() for k in AD_KEYWORDS)
-    ]
+    clean_links = []
+    for l in links:
+        url_lower = l["url"].lower()
+        referer_lower = (l.get("referer") or "").lower()
+        
+        # If the URL or Referer matches an ad pattern, skip it
+        if any(k in url_lower or k in referer_lower for k in AD_KEYWORDS):
+            continue
+        if any(d in url_lower or d in referer_lower for d in AD_DOMAINS):
+            continue
+            
+        clean_links.append(l)
     
     target_links = clean_links if clean_links else links
 
-    # 1. Prefer HLS (Master playlists)
-    # Master manifests are the "Holy Grail" for grabbers
+    # 1. 1DM Preference: Direct Site Media (High Quality)
+    # If we find a direct link on the same domain or a media script, favor it!
+    for link in target_links:
+        u = link["url"].lower()
+        # Prioritize site-specific media scripts like remote_control.php or get_file
+        if "remote_control.php" in u or "get_file" in u:
+            return link["url"]
+
+    # 2. Prefer JS Sniffer HLS
+    for link in target_links:
+        if link.get("source", "").startswith("js_") and ".m3u8" in link["url"]:
+             return link["url"]
+
+    # 3. Prefer Master Manifests
     MASTER_MANIFEST_KEYWORDS = ("master", "playlist", "index", "manifest", "m3u8", "main")
-    
     for link in target_links:
         if link.get("stream_type") == "hls":
             u = link["url"].lower()
             if any(k in u for k in MASTER_MANIFEST_KEYWORDS):
-                # Extra check: segments often have .ts inside the m3u8 path, ignore them
                 if not SEGMENT_PATTERNS.search(u):
                     return link["url"]
             
+    # 4. Prefer regular HLS
     for link in target_links:
         if link.get("stream_type") == "hls":
             return link["url"]
             
-    # 2. Prefer combined video+audio
+    # 5. Prefer JS Sniffer MP4/WebM (usually the result of a menu click)
+    for link in target_links:
+        if link.get("source", "").startswith("js_") and link.get("stream_type") in ("mp4", "webm"):
+             return link["url"]
+
+    # 6. Prefer combined video+audio
     for link in target_links:
         if link.get("has_video") and link.get("has_audio"):
             return link["url"]
             
-    # 3. Prefer MP4
+    # 7. Prefer MP4
     for link in target_links:
         if link.get("stream_type") == "mp4":
-            return link["url"]
-            
-    # 4. Filter by filesize if unknown
-    for link in target_links:
-        if link.get("stream_type") not in ("unknown", "audio"):
             return link["url"]
             
     return target_links[0]["url"]
