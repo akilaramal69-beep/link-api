@@ -19,10 +19,22 @@ If your bot sends an unsupported URL (like `milfnut.com`), or if `yt-dlp` is tem
 
 ---
 
+## ⚡ V3 Features: Ad-Shield & Direct-Link Mode
+This latest version includes major performance and reliability upgrades:
+
+1.  **Strategy 0 (Direct Link Mode):** If you send a direct media URL (e.g., `.m3u8`, `.mp4`), the API returns it **instantly** without using a browser, saving RAM and preventing errors.
+2.  **Built-in Ad-Shield:** Aggressive blocking of VAST, IMA, and common ad-networks (`preroll`, `midroll`, `traffic`, etc.).
+3.  **1.5MB Intelligence Gate:** The API automatically drops any video file smaller than 1.5MB. Since ads are tiny clips, this effectively filters out 99% of video ads while keeping your main content.
+4.  **Smart Sorter:** Automatically identifies and prioritizes "Master Playlists" and high-quality streams over promotional snippets.
+
+---
+
 ## How It Works
 
 ```
 API Request (Any URL)
+  │
+  ├── 0. Direct Media Recognition (Instant return for .m3u8/.mp4)
   │
   ├── 1. Try yt-dlp extraction (Fastest, best metadata)
   │
@@ -30,7 +42,8 @@ API Request (Any URL)
          ├── Launch Headless Chromium browser
          ├── Traverse all iframes & click Play buttons
          ├── Intercept raw IDM network requests (.mp4, .m3u8, .ts, etc)
-         ├── Ignore ads/trackers
+         ├── Ad-Shield: Filter by Network & Keyword
+         ├── Intelligence Gate: Drop files < 1.5MB
          └── Format links into a unified JSON structure
 ```
 
