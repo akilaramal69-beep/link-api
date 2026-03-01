@@ -87,13 +87,14 @@ async def extract_post(request: Request):
         data = await request.json()
         url = data.get("url")
         if not url:
-            raise ValueError("Missing 'url' in JSON body")
+            return {"error": "Missing 'url' in JSON body", "formats": []}
             
         from extractor import extract_raw_ytdlp
         result = await extract_raw_ytdlp(url)
         return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Return 200 with soft error so the bot doesn't trigger its raw HTML fallback
+        return {"error": str(e), "formats": [], "title": "Extraction Failed"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

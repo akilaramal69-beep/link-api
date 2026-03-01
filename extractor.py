@@ -151,9 +151,74 @@ def _pick_best(links: list) -> Optional[str]:
 
 
 async def extract_raw_ytdlp(url: str) -> dict:
-    """Run yt-dlp on the URL and return the raw info dict untouched."""
+    """Run yt-dlp on the URL. If it fails or yields no formats, fallback to Playwright
+    and format the results as a fake yt-dlp info dict so the bot understands it."""
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _ytdlp_extract, url)
-    if not result:
-        raise ValueError(f"No info extracted for {url}")
-    return result
+    
+    # Optional shortcut for obvious non-yt-dlp sites
+    is_known = any(d in url.lower() for d in [
+        "youtube.com", "youtu.be", "twitter.com", "x.com", "instagram.com", 
+        "tiktok.com", "reddit.com", "facebook.com", "vimeo.com"
+    ])
+    
+    ytdlp_info = None
+    if is_known:
+        try:
+            ytdlp_info = await loop.run_in_executor(None, _ytdlp_extract, url)
+        except Exception:
+            pass
+
+    # If yt-dlp gave us good formats, just return it directly (bot drops-in perfectly)
+    if ytdlp_info and ytdlp_info.get("formats"):
+        return ytdlp_info
+
+    # Otherwise (like milfnut.com), run our browser interception!
+    try:
+        browser_results = await intercept_browser(url, timeout_ms=25000)
+    except Exception as e:
+        raise ValueError(f"Both yt-dlp and browser interception failed: {e}")
+
+    if not browser_results:
+        if ytdlp_info:
+            return ytdlp_info  # return the empty ytdlp dict
+        raise ValueError("Could not extract any media links from this page.")
+
+    # Fabricate a fake yt-dlp dictionary perfectly tailored for `telelinkworking` plugin
+    fake_info = {
+        "id": "browser_extract",
+        "title": "Extracted Video",
+        "extractor": "Playwright",
+        "webpage_url": url,
+        "formats": []
+    }
+
+    for i, link in enumerate(browser_results):
+        fmt = {
+            "format_id": f"browser_{i}",
+            "url": link["url"],
+            "ext": "mp4", # Bot generally prefers mp4 default
+            "vcodec": "avc1" if link.get("stream_type") in ("mp4", "hls", "dash", "video") else "none",
+            "acodec": "mp4a" if link.get("stream_type") in ("mp4", "hls", "dash", "audio", "video") else "none",
+        }
+        
+        # Make HLS look like standard yt-dlp HLS formats
+        if link.get("stream_type") == "hls":
+            fmt["protocol"] = "m3u8_native"
+            fmt["ext"] = "mp4"
+            fmt["format_note"] = "HLS Stream"
+        elif link.get("stream_type") == "audio":
+            fmt["vcodec"] = "none"
+            fmt["ext"] = "m4a"
+            fmt["format_note"] = "Audio Stream"
+            
+        # Hardcode a resolution so the bot's format selector UI works (it expects things like 720p)
+        fmt["width"] = 1280
+        fmt["height"] = 720
+        
+        # Inject standard byte size if known
+        if link.get("content_length"):
+            fmt["filesize"] = link["content_length"]
+            
+        fake_info["formats"].append(fmt)
+
+    return fake_info
