@@ -58,7 +58,22 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
         response["uploader"] = ytdlp_result.get("uploader")
 
     # Merge browser links + yt-dlp formats
-    all_links = list(browser_results)
+    # Filter browser results to remove likely ads (very small files that aren't HLS)
+    filtered_browser_links = []
+    for link in browser_results:
+        # If it's HLS, we keep it (playlists are small)
+        if link.get("stream_type") == "hls":
+            filtered_browser_links.append(link)
+            continue
+            
+        # If it has a known content length and it's tiny (< 1MB), it's likely an ad or segment
+        length = link.get("content_length")
+        if length and length < 1_000_000: # 1MB
+            continue
+            
+        filtered_browser_links.append(link)
+
+    all_links = list(filtered_browser_links)
 
     if ytdlp_result:
         for fmt in ytdlp_result.get("formats", []):
@@ -89,11 +104,12 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
             seen.add(u)
             unique_links.append(link)
 
-    # Sort: combined streams first, then by height
+    # Sort: combined streams first, then by height, then by filesize
     unique_links.sort(
         key=lambda x: (
             bool(x.get("has_video") and x.get("has_audio")),
             x.get("height") or 0,
+            x.get("filesize") or x.get("content_length") or 0,
         ),
         reverse=True,
     )
@@ -189,7 +205,22 @@ async def extract_raw_ytdlp(url: str) -> dict:
     except Exception as e:
         raise ValueError(f"Both yt-dlp and browser interception failed: {e}")
 
-    if not browser_results:
+    # Filter browser results to remove likely ads (very small files that aren't HLS)
+    filtered_browser_links = []
+    for link in browser_results:
+        # If it's HLS, we keep it (playlists are small)
+        if link.get("stream_type") == "hls":
+            filtered_browser_links.append(link)
+            continue
+            
+        # If it has a known content length and it's tiny (< 1MB), it's likely an ad or segment
+        length = link.get("content_length")
+        if length and length < 1_000_000: # 1MB
+            continue
+            
+        filtered_browser_links.append(link)
+
+    if not filtered_browser_links:
         if ytdlp_info:
             return ytdlp_info  # return the empty ytdlp dict
         raise ValueError("Could not extract any media links from this page.")
@@ -203,7 +234,7 @@ async def extract_raw_ytdlp(url: str) -> dict:
         "formats": []
     }
 
-    for i, link in enumerate(browser_results):
+    for i, link in enumerate(filtered_browser_links):
         fmt = {
             "format_id": f"browser_{i}",
             "url": link["url"],

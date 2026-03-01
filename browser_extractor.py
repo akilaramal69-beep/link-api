@@ -21,9 +21,12 @@ MEDIA_URL_PATTERNS = re.compile(
 )
 
 # Patterns to ignore (ads, trackers, image thumbnails, etc.)
-# We removed "preview" and "tracking" because some CDNs use these words in actual video paths!
+# Extremely aggressive ad-network filtering for video ads.
 IGNORE_PATTERNS = re.compile(
     r"(doubleclick|googlesyndication|adservice|analytics|googletagmanager"
+    r"|exoclick|trafficjunky|chaturbate|jerkmate|bongacams|stripchat|popads"
+    r"|bidgear|adsco|outbrain|taboola|mgid|vast|vpaid|ima3|preroll|midroll"
+    r"|postroll|advertisement|branded|sponsor"
     r"|\.jpg|\.jpeg|\.png|\.gif|\.webp|\.svg|\.ico|\.css|\.js|\.woff|\.ttf"
     r"|/ads/|/ad/|beacon|pixel)",
     re.IGNORECASE,
