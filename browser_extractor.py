@@ -121,6 +121,41 @@ SNIFFER_JS = """
         } catch(e) {}
         return response;
     };
+
+    // 7. NEW: Scan all scripts and data-attributes for hidden URLs
+    const scanDomForHiddenUrls = () => {
+        // Scan scripts
+        document.querySelectorAll('script').forEach(s => {
+            const content = s.textContent || s.innerText;
+            if (content && (content.includes('.m3u8') || content.includes('.mp4'))) {
+                const matches = content.match(/https?:\\?\\?\/\\?\\?\/[^"']+\.(m3u8|mp4|mpd)/g);
+                if (matches) matches.forEach(m => logMedia(m.replace(/\\\\/g, ''), 'script_scan'));
+            }
+        });
+
+        // Scan data attributes
+        const allElements = document.getElementsByTagName("*");
+        for (let i = 0; i < allElements.length; i++) {
+            const el = allElements[i];
+            for (let j = 0; j < el.attributes.length; j++) {
+                const attr = el.attributes[j];
+                if (attr.name.startsWith('data-') || attr.name === 'value' || attr.name === 'src') {
+                    const val = attr.value;
+                    if (val && (val.includes('.m3u8') || val.includes('.mp4'))) {
+                         if (val.startsWith('http')) logMedia(val, 'attr_scan');
+                         else {
+                            const matches = val.match(/https?:\\?\\?\/\\?\\?\/[^"']+\.(m3u8|mp4|mpd)/g);
+                            if (matches) matches.forEach(m => logMedia(m.replace(/\\\\/g, ''), 'attr_regex_scan'));
+                         }
+                    }
+                }
+            }
+        }
+    };
+    
+    // Initial scan and periodic scan
+    scanDomForHiddenUrls();
+    setInterval(scanDomForHiddenUrls, 3000);
 })();
 """
 
@@ -237,57 +272,66 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
             await asyncio.sleep(12.0) # Wait extra for 1DM-style sniffing to fire
 
             # Aggressive discovery: loop through frames and click/sniff
-            frames = page.frames
-            for frame in frames:
-                # 1. Evaluate DOM links (fallback)
-                try:
-                    dom_links = await frame.evaluate("""() => {
-                        const urls = new Set();
-                        document.querySelectorAll('video, audio, source').forEach(el => {
-                            if (el.src) urls.add(el.src);
-                            if (el.currentSrc) urls.add(el.currentSrc);
-                        });
-                        return Array.from(urls).filter(u => u.startsWith('http'));
-                    }""")
-                    for link in dom_links:
-                        if not IGNORE_PATTERNS.search(link) or MEDIA_URL_PATTERNS.search(link):
-                            _add_media_entry(found, link, source="dom_scan")
-                except Exception:
-                    pass
-
-                # 2. Trigger play/download buttons
-                # We also look for dropdowns and click the children (1DM style)
-                selectors = [
-                    "button[aria-label*='play' i]", "button[class*='play' i]",
-                    "button:has-text('Download')", "a:has-text('Download')",
-                    "div.download", ".download-button", ".play-button",
-                    "video", "[data-testid*='play' i]"
-                ]
-                
-                for selector in selectors:
+            # We use a loop to handle frames that might appear after clicking
+            for _ in range(3):
+                frames = page.frames
+                for frame in frames:
+                    # 1. Evaluate DOM links (fallback)
                     try:
-                        elements = await frame.query_selector_all(selector)
-                        for el in elements:
-                            if await el.is_visible():
-                                await el.click(timeout=2000, no_wait_after=True)
-                                await asyncio.sleep(1)
-                            
-                                # If a menu appeared, try to click quality options
-                                sub_selectors = [
-                                    "li:has-text('p')", "a:has-text('p')",
-                                    "li:has-text('MP4')", "a:has-text('MP4')",
-                                    "li:has-text('Download')", "a:has-text('Download')"
-                                ]
-                                for sub in sub_selectors:
-                                    try:
-                                        sub_el = await frame.query_selector(sub)
-                                        if sub_el and await sub_el.is_visible():
-                                            await sub_el.click(timeout=1000, no_wait_after=True)
-                                            await asyncio.sleep(1)
-                                    except Exception:
-                                        pass
+                        dom_links = await frame.evaluate("""() => {
+                            const urls = new Set();
+                            document.querySelectorAll('video, audio, source').forEach(el => {
+                                if (el.src) urls.add(el.src);
+                                if (el.currentSrc) urls.add(el.currentSrc);
+                            });
+                            // Also search the entire page text for M3U8 links as a hail-mary
+                            const pageText = document.documentElement.innerHTML;
+                            const matches = pageText.match(/https?:\\?\\?\/\\?\\?\/[^"']+\.(m3u8|mp4|mpd)/g);
+                            if (matches) matches.forEach(m => urls.add(m.replace(/\\\\/g, '')));
+
+                            return Array.from(urls).filter(u => u.startsWith('http'));
+                        }""")
+                        for link in dom_links:
+                            if not IGNORE_PATTERNS.search(link) or MEDIA_URL_PATTERNS.search(link):
+                                _add_media_entry(found, link, source="dom_scan")
                     except Exception:
                         pass
+
+                    # 2. Trigger play/download buttons
+                    selectors = [
+                        "button[aria-label*='play' i]", "button[class*='play' i]",
+                        "button:has-text('Download')", "a:has-text('Download')",
+                        "div.download", ".download-button", ".play-button",
+                        "video", "[data-testid*='play' i]", ".vjs-big-play-button"
+                    ]
+                    
+                    for selector in selectors:
+                        try:
+                            elements = await frame.query_selector_all(selector)
+                            for el in elements:
+                                if await el.is_visible():
+                                    try:
+                                        await el.click(timeout=1500, no_wait_after=True)
+                                        await asyncio.sleep(0.5)
+                                    except: pass
+                                
+                                    # If a menu appeared, try to click quality options
+                                    sub_selectors = [
+                                        "li:has-text('p')", "a:has-text('p')",
+                                        "li:has-text('MP4')", "a:has-text('MP4')",
+                                        "li:has-text('Download')", "a:has-text('Download')"
+                                    ]
+                                    for sub in sub_selectors:
+                                        try:
+                                            sub_el = await frame.query_selector(sub)
+                                            if sub_el and await sub_el.is_visible():
+                                                await sub_el.click(timeout=1000, no_wait_after=True)
+                                                await asyncio.sleep(0.5)
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
+                await asyncio.sleep(3) # Wait for network activity after clicks
 
         except Exception as e:
             if not found:

@@ -1,17 +1,11 @@
 """
-extractor.py — Orchestrates two extraction strategies:
-  1. Playwright browser interception (IDM-style) — works on ANY site
-  2. yt-dlp — fallback and enrichment for known platforms
-
-Strategy:
-  - If use_browser=True, try Playwright first
-  - ALWAYS try yt-dlp as well (as fallback/enrichment)
-  - Merge and deduplicate results from both
-  - Raise only if BOTH fail
+extractor.py — Orchestrates media extraction using browser interception.
+This module relies on Playwright for sniffing media URLs and httpx for validation.
 """
 
 import asyncio
 import re
+import httpx
 from typing import Optional
 from browser_extractor import intercept_browser, MEDIA_URL_PATTERNS
 
@@ -105,8 +99,59 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
             seen.add(u)
             unique_links.append(link)
 
+    # ── Final Layer: Asynchronous Validation (HEAD requests) ───────────────────
+    # We only validate links that aren't already flagged as high-confidence media
+    # OR any link that looks suspicious.
+    async def _validate_link(link_item: dict) -> Optional[dict]:
+        url = link_item["url"]
+        
+        # Skip validation for obviously media URLs (optimization)
+        u_lower = url.lower().split('?')[0]
+        if any(u_lower.endswith(ext) for ext in (".m3u8", ".mp4", ".mpd", ".webm")):
+             return link_item
+             
+        try:
+            async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+                headers = {"User-Agent": "Mozilla/5.0", "Referer": link_item.get("referer") or url}
+                resp = await client.head(url, headers=headers)
+                
+                # If HEAD fails or is not allowed, try a range-request for 1 byte
+                if resp.status_code >= 400:
+                    headers["Range"] = "bytes=0-0"
+                    resp = await client.get(url, headers=headers)
+                
+                ct = resp.headers.get("content-type", "").lower()
+                
+                # DISCARD HTML/JSON/TEXT
+                if "text/html" in ct or "application/json" in ct or "text/plain" in ct:
+                    return None
+                    
+                # If it's a media type, we keep it
+                if "video" in ct or "audio" in ct or "mpegurl" in ct or "dash+xml" in ct:
+                    link_item["content_type"] = ct
+                    if not link_item.get("content_length"):
+                        link_item["content_length"] = int(resp.headers.get("content-length", "0") or "0")
+                    return link_item
+                
+                # If it's octet-stream we're cautious but usually keep it if it's not small
+                if "octet-stream" in ct:
+                     return link_item
+                     
+        except Exception:
+            # If we can't validate, we're cautious: discard if it's a .php/.html/.aspx but keep otherwise
+            if any(ext in u_lower for ext in (".php", ".html", ".aspx", ".jsp")):
+                return None
+            return link_item
+            
+        return None
+
+    # Run validation in parallel
+    validated_tasks = [asyncio.create_task(_validate_link(l)) for l in unique_links]
+    validated_results = await asyncio.gather(*validated_tasks)
+    final_links = [l for l in validated_results if l is not None]
+
     # Sort: combined streams first, then by height, then by filesize
-    unique_links.sort(
+    final_links.sort(
         key=lambda x: (
             bool(x.get("has_video") and x.get("has_audio")),
             x.get("height") or 0,
@@ -115,9 +160,9 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
         reverse=True,
     )
 
-    response["links"] = unique_links
-    response["total"] = len(unique_links)
-    response["best_link"] = _pick_best(unique_links)
+    response["links"] = final_links
+    response["total"] = len(final_links)
+    response["best_link"] = _pick_best(final_links)
     response["errors"] = errors if errors else None
 
     return response
@@ -214,85 +259,49 @@ def _guess_type_from_url(url: str) -> str:
 
 
 async def extract_raw_ytdlp(url: str) -> dict:
-    """Run browser interception (yt-dlp removed)."""
+    """
+    Run browser interception and return results in the legacy yt-dlp format
+    for drop-in compatibility with older bots.
+    """
     try:
-        is_direct = bool(MEDIA_URL_PATTERNS.search(url.split('?')[0]))
-        if is_direct:
-            browser_results = [{
-                "url": url,
-                "stream_type": _guess_type_from_url(url),
-                "source": "direct_input"
-            }]
-        else:
-            browser_results = await intercept_browser(url, timeout_ms=25000)
-    except Exception as e:
-        raise ValueError(f"Browser interception extraction failed: {e}")
-
-    # Filter results
-    filtered_browser_links = []
-    AD_KEYWORDS = ("ads", "vast", "click", "pop", "preroll", "midroll", "postroll", "sponsored")
-    
-    for link in browser_results:
-        if any(k in link["url"].lower() for k in AD_KEYWORDS):
-            continue
-
-        # 1DM Logic: Filter out likely segments/chunks
-        is_segment = bool(SEGMENT_PATTERNS.search(link["url"]))
-        if is_segment and link.get("stream_type") != "hls":
-            continue
-
-        if link.get("stream_type") == "hls":
-            filtered_browser_links.append(link)
-            continue
-        length = link.get("content_length")
-        if length and length < 1_500_000:
-            continue
-        filtered_browser_links.append(link)
-
-    if not filtered_browser_links:
-        raise ValueError(f"Could not extract any valid media links from: {url}")
-
-    # Sort candidates
-    filtered_browser_links.sort(
-        key=lambda x: (
-            x.get("stream_type") == "hls",
-            any(k in x["url"].lower() for k in ("master", "playlist", "index")),
-            x.get("content_length") or 0
-        ),
-        reverse=True
-    )
-
-    fake_info = {
-        "id": "browser_extract",
-        "title": "Extracted Video",
-        "extractor": "Playwright",
-        "webpage_url": url,
-        "formats": []
-    }
-
-    for i, link in enumerate(filtered_browser_links):
-        fmt = {
-            "format_id": f"browser_{i}",
-            "url": link["url"],
-            "ext": (link.get("content_type") or "").split("/")[-1] or "mp4",
-            "vcodec": "avc1" if link.get("stream_type") in ("mp4", "hls", "dash", "video") else "none",
-            "acodec": "mp4a" if link.get("stream_type") in ("mp4", "hls", "dash", "audio", "video") else "none",
-        }
+        # Call the main unified extraction logic
+        res = await extract_links(url, use_browser=True, timeout=25)
         
-        if link.get("stream_type") == "hls":
-            fmt["protocol"] = "m3u8_native"
-            fmt["ext"] = "mp4"
-            fmt["format_note"] = "HLS Stream"
-        elif link.get("stream_type") == "audio":
-            fmt["vcodec"] = "none"
-            fmt["ext"] = "m4a"
-            fmt["format_note"] = "Audio Stream"
-            
-        fmt["width"] = 1280
-        fmt["height"] = 720
-        if link.get("content_length"):
-            fmt["filesize"] = link["content_length"]
-            
-        fake_info["formats"].append(fmt)
+        # Transform the unified response into the legacy format
+        fake_info = {
+            "id": "browser_extract",
+            "title": res.get("title", "Extracted Video"),
+            "thumbnail": res.get("thumbnail"),
+            "duration": res.get("duration"),
+            "extractor": "Playwright",
+            "webpage_url": url,
+            "formats": []
+        }
 
-    return fake_info
+        for i, link in enumerate(res.get("links", [])):
+            fmt = {
+                "format_id": f"browser_{i}",
+                "url": link["url"],
+                "ext": (link.get("content_type") or "video/mp4").split("/")[-1] or "mp4",
+                "width": link.get("width", 1280),
+                "height": link.get("height", 720),
+                "vcodec": "avc1" if link.get("has_video") else "none",
+                "acodec": "mp4a" if link.get("has_audio") else "none",
+                "filesize": link.get("filesize") or link.get("content_length"),
+                "source": link.get("source")
+            }
+            
+            # Special handling for HLS
+            if link.get("stream_type") == "hls":
+                fmt["protocol"] = "m3u8_native"
+                fmt["ext"] = "mp4"
+                fmt["format_note"] = "HLS Stream"
+                fmt["vcodec"] = "avc1"
+                fmt["acodec"] = "mp4a"
+            
+            fake_info["formats"].append(fmt)
+
+        return fake_info
+
+    except Exception as e:
+        raise ValueError(f"Unified extraction failed: {e}")
