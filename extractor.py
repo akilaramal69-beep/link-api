@@ -17,6 +17,13 @@ from typing import Optional
 from browser_extractor import intercept_browser, MEDIA_URL_PATTERNS
 
 
+# Regex to identify media segments/chunks (usually low-value)
+SEGMENT_PATTERNS = re.compile(
+    r"[-_](seg|chunk|part|frag|fragment|track|init|video\d|audio\d)[-_]|\d+\.ts|\d+\.m4v",
+    re.IGNORECASE,
+)
+
+
 async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -> dict:
     browser_results = []
     ytdlp_result = None
@@ -77,6 +84,11 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
     for link in browser_results:
         # If it's a known ad domain or has ad keywords, skip it entirely
         if any(k in link["url"].lower() for k in AD_KEYWORDS):
+            continue
+
+        # 1DM Logic: Filter out likely segments/chunks unless it's the ONLY thing found
+        is_segment = bool(SEGMENT_PATTERNS.search(link["url"]))
+        if is_segment and link.get("stream_type") != "hls":
             continue
 
         # If it's HLS, we keep it (playlists are small)
@@ -184,10 +196,16 @@ def _pick_best(links: list) -> Optional[str]:
     target_links = clean_links if clean_links else links
 
     # 1. Prefer HLS (Master playlists)
+    # Master manifests are the "Holy Grail" for grabbers
+    MASTER_MANIFEST_KEYWORDS = ("master", "playlist", "index", "manifest", "m3u8", "main")
+    
     for link in target_links:
-        if link.get("stream_type") == "hls" and "m3u8" in link["url"]:
-            if any(k in link["url"].lower() for k in ("master", "playlist", "index", "manifest")):
-                return link["url"]
+        if link.get("stream_type") == "hls":
+            u = link["url"].lower()
+            if any(k in u for k in MASTER_MANIFEST_KEYWORDS):
+                # Extra check: segments often have .ts inside the m3u8 path, ignore them
+                if not SEGMENT_PATTERNS.search(u):
+                    return link["url"]
             
     for link in target_links:
         if link.get("stream_type") == "hls":
@@ -260,6 +278,12 @@ async def extract_raw_ytdlp(url: str) -> dict:
     for link in browser_results:
         if any(k in link["url"].lower() for k in AD_KEYWORDS):
             continue
+
+        # 1DM Logic: Filter out likely segments/chunks
+        is_segment = bool(SEGMENT_PATTERNS.search(link["url"]))
+        if is_segment and link.get("stream_type") != "hls":
+            continue
+
         if link.get("stream_type") == "hls":
             filtered_browser_links.append(link)
             continue

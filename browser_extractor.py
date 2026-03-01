@@ -36,11 +36,65 @@ IGNORE_PATTERNS = re.compile(
 MIN_CONTENT_LENGTH = 50_000  # 50 KB
 
 
+# JS Sniffer Script to be injected into every page/iframe (1DM-style)
+SNIFFER_JS = """
+(function() {
+    const logMedia = (url, source) => {
+        if (!url || typeof url !== 'string' || url.startsWith('blob:') || url.startsWith('data:')) return;
+        if (window.pythonSniff) {
+            window.pythonSniff(url, source);
+        }
+    };
+
+    // 1. Hook into HTMLMediaElement prototype to catch .src assignments
+    const originalSrcDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+    Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+        set: function(val) {
+            logMedia(val, 'media_proto_src');
+            return originalSrcDescriptor.set.apply(this, arguments);
+        },
+        get: function() {
+            return originalSrcDescriptor.get.apply(this, arguments);
+        }
+    });
+
+    // 2. Monitor events on all video/audio tags
+    const monitorElement = (el) => {
+        if (el._sniffed) return;
+        el._sniffed = true;
+        ['loadstart', 'play', 'playing', 'loadedmetadata'].forEach(ev => {
+            el.addEventListener(ev, () => {
+                logMedia(el.src || el.currentSrc, 'media_event_' + ev);
+            }, { passive: true });
+        });
+    };
+
+    document.querySelectorAll('video, audio').forEach(monitorElement);
+
+    // 3. Watch for NEW media elements via MutationObserver
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach(m => {
+            m.addedNodes.forEach(node => {
+                if (node.nodeName === 'VIDEO' || node.nodeName === 'AUDIO') monitorElement(node);
+                if (node.querySelectorAll) node.querySelectorAll('video, audio').forEach(monitorElement);
+            });
+        });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    // 4. Periodically check currentSrc (fallback)
+    setInterval(() => {
+        document.querySelectorAll('video, audio').forEach(el => {
+            logMedia(el.currentSrc || el.src, 'media_poll');
+        });
+    }, 2000);
+})();
+"""
+
 async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
     """
     Launch a headless Chromium browser, navigate to the URL, and intercept
-    all media/stream network requests — like IDM does.
-    Returns a list of detected media links with metadata.
+    all media/stream network requests — like 1DM does.
     """
     found: dict[str, dict] = {}  # keyed by URL to deduplicate
 
@@ -63,12 +117,20 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                 "Chrome/122.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1280, "height": 720},
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
         )
 
+        # Inject 1DM-style sniffer script into every frame
+        await context.add_init_script(SNIFFER_JS)
+
         page = await context.new_page()
+
+        # Binding to receive JS-discovered links
+        async def python_sniff(source_info, media_url, sniffer_source):
+            if media_url and media_url.startswith('http'):
+                _add_media_entry(found, media_url, source=f"js_{sniffer_source}")
+
+        await page.expose_binding("pythonSniff", python_sniff)
 
         async def on_request(request: Request):
             req_url = request.url
@@ -80,8 +142,6 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
         async def on_response(response):
             try:
                 resp_url = response.url
-                
-                # If it's explicitly a media pattern, we don't care if it matches an ignore pattern!
                 is_media_url = bool(MEDIA_URL_PATTERNS.search(resp_url))
                 
                 if not is_media_url and IGNORE_PATTERNS.search(resp_url):
@@ -90,7 +150,6 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                 content_type = response.headers.get("content-type", "")
                 content_length = int(response.headers.get("content-length", "0") or "0")
                 
-                # Double check to prevent intercepting explicit image responses
                 if "image/" in content_type or "text/" in content_type:
                     return
 
@@ -114,16 +173,32 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
 
         try:
             await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-            await asyncio.sleep(5)
+            await asyncio.sleep(8) # Wait extra for 1DM-style sniffing to fire
 
+            # Aggressive discovery: loop through frames and click/sniff
             frames = page.frames
             for frame in frames:
+                # 1. Evaluate DOM links (fallback)
+                try:
+                    dom_links = await frame.evaluate("""() => {
+                        const urls = new Set();
+                        document.querySelectorAll('video, audio, source').forEach(el => {
+                            if (el.src) urls.add(el.src);
+                            if (el.currentSrc) urls.add(el.currentSrc);
+                        });
+                        return Array.from(urls).filter(u => u.startsWith('http'));
+                    }""")
+                    for link in dom_links:
+                        if not IGNORE_PATTERNS.search(link) or MEDIA_URL_PATTERNS.search(link):
+                            _add_media_entry(found, link, source="dom_scan")
+                except Exception:
+                    pass
+
+                # 2. Trigger play buttons
                 for selector in [
                     "button[aria-label*='play' i]",
                     "button[class*='play' i]",
                     ".play-button",
-                    ".ytp-play-button",
-                    ".vjs-big-play-button",
                     "video",
                     "[data-testid*='play' i]",
                 ]:
@@ -135,26 +210,6 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                             break
                     except Exception:
                         pass
-
-            for frame in frames:
-                try:
-                    dom_links = await frame.evaluate("""() => {
-                        const urls = new Set();
-                        document.querySelectorAll('video, audio, source').forEach(el => {
-                            if (el.src) urls.add(el.src);
-                            if (el.currentSrc) urls.add(el.currentSrc);
-                        });
-                        return Array.from(urls).filter(u => u.startsWith('http'));
-                    }""")
-                    for link in dom_links:
-                        # Stricter parsing: DOM elements often have poster images in the src if we aren't careful
-                        if IGNORE_PATTERNS.search(link) and not MEDIA_URL_PATTERNS.search(link):
-                            continue
-                            
-                        # If we get here, it's either an explicit media pattern or not an ignored image/text pattern
-                        _add_media_entry(found, link, source="dom")
-                except Exception:
-                    pass
 
         except Exception as e:
             if not found:
