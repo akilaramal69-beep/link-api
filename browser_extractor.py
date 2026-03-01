@@ -11,7 +11,6 @@ MEDIA_CONTENT_TYPES = (
     "application/vnd.apple.mpegurl",  # HLS alt
     "application/dash+xml",        # DASH
     "application/octet-stream",    # Raw binary (often video)
-    "application/x-www-form-urlencoded",
 )
 
 # URL patterns that indicate video/audio streams
@@ -31,7 +30,7 @@ IGNORE_PATTERNS = re.compile(
     r"|postroll|advertisement|branded|sponsor|tracking|pixel|beacon"
     r"|popunder|clickunder|onclick|adsterra|propellerads|adespresso|yandex"
     r"|\.jpg|\.jpeg|\.png|\.gif|\.webp|\.svg|\.ico|\.css|\.js|\.woff|\.ttf"
-    r"|/ads/|/ad/|/pixel)",
+    r"|\.php|\.html|\.htm|\.jsp|\.aspx|/ads/|/ad/|/pixel)",
     re.IGNORECASE,
 )
 
@@ -172,13 +171,14 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
                 if not is_media_url and IGNORE_PATTERNS.search(resp_url):
                     return
 
-                content_type = response.headers.get("content-type", "")
+                content_type = response.headers.get("content-type", "").lower()
                 content_length = int(response.headers.get("content-length", "0") or "0")
                 
-                if "image/" in content_type or "text/" in content_type:
+                # Strict: Ignore anything that is explicitly text or html
+                if "text/" in content_type or "html" in content_type or "json" in content_type:
                     return
 
-                is_media_type = any(mt in content_type.lower() for mt in MEDIA_CONTENT_TYPES)
+                is_media_type = any(mt in content_type for mt in MEDIA_CONTENT_TYPES)
 
                 if is_media_type or is_media_url:
                     if content_length > 0 and content_length < MIN_CONTENT_LENGTH and not is_media_url:

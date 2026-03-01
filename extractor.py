@@ -101,6 +101,13 @@ async def extract_links(url: str, use_browser: bool = True, timeout: int = 25) -
         if length and length < 1_500_000:
             continue
             
+        # 1DM Hardening: Explicitly discard anything that looks like a webpage
+        u_lower = link["url"].lower()
+        if any(ext in u_lower for ext in (".html", ".htm", ".php", ".jsp", ".aspx")):
+             # If it's a known media script, we still allow it
+             if "remote_control.php" not in u_lower and "get_file" not in u_lower:
+                 continue
+                 
         filtered_browser_links.append(link)
 
     all_links = list(filtered_browser_links)
@@ -248,6 +255,13 @@ def _pick_best(links: list) -> Optional[str]:
     # 7. Prefer MP4
     for link in target_links:
         if link.get("stream_type") == "mp4":
+            return link["url"]
+            
+    # 8. Fallback to the first available link, but only if it's NOT just the input page
+    # (Checking against common non-media patterns one last time)
+    for link in target_links:
+        u = link["url"].lower()
+        if not any(k in u for k in (".php", ".html", ".htm")):
             return link["url"]
             
     return target_links[0]["url"]
