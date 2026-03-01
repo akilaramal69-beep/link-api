@@ -21,14 +21,15 @@ MEDIA_URL_PATTERNS = re.compile(
 )
 
 # Patterns to ignore (ads, trackers, image thumbnails, etc.)
-# Extremely aggressive ad-network filtering for video ads.
+# Extremely aggressive ad-network filtering for video ads and redirects.
 IGNORE_PATTERNS = re.compile(
     r"(doubleclick|googlesyndication|adservice|analytics|googletagmanager"
     r"|exoclick|trafficjunky|chaturbate|jerkmate|bongacams|stripchat|popads"
     r"|bidgear|adsco|outbrain|taboola|mgid|vast|vpaid|ima3|preroll|midroll"
-    r"|postroll|advertisement|branded|sponsor"
+    r"|postroll|advertisement|branded|sponsor|tracking|pixel|beacon"
+    r"|popunder|clickunder|onclick|adsterra|propellerads|adespresso|yandex"
     r"|\.jpg|\.jpeg|\.png|\.gif|\.webp|\.svg|\.ico|\.css|\.js|\.woff|\.ttf"
-    r"|/ads/|/ad/|beacon|pixel)",
+    r"|/ads/|/ad/|/pixel)",
     re.IGNORECASE,
 )
 
@@ -125,10 +126,18 @@ async def intercept_browser(url: str, timeout_ms: int = 25000) -> list[dict]:
 
         page = await context.new_page()
 
+        # ── 1DM Hardening: Block Popups & Dialogs ─────────────────────────────
+        # Close any popup windows immediately (click-unders)
+        page.on("popup", lambda p: asyncio.create_task(p.close()))
+        # Automatically dismiss alerts/prompts (ad-scams)
+        page.on("dialog", lambda d: asyncio.create_task(d.dismiss()))
+
         # Binding to receive JS-discovered links
         async def python_sniff(source_info, media_url, sniffer_source):
             if media_url and media_url.startswith('http'):
-                _add_media_entry(found, media_url, source=f"js_{sniffer_source}")
+                # Still check against ignore patterns to be safe
+                if not IGNORE_PATTERNS.search(media_url) or MEDIA_URL_PATTERNS.search(media_url):
+                    _add_media_entry(found, media_url, source=f"js_{sniffer_source}")
 
         await page.expose_binding("pythonSniff", python_sniff)
 
